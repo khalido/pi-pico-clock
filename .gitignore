@@ -1,3 +1,13 @@
+# no env variables so using a python file to store wifi pw
+**/env.py
+
+# MacOS desktop metadata files
+.DS_Store
+
+# IDE/Editor files
+.vscode/
+.micropico
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
