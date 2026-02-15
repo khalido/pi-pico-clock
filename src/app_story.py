@@ -1,50 +1,45 @@
 import gc
 import time
 
-_story = "Press X for a fun fact!"
+_story = "Press X for a story!"
 _loading = False
 _x_was_pressed = False
 
 _SYSTEM = (
-    "You are a fun assistant for a kid. "
-    "Share an interesting fun fact in 2-3 sentences, max 45 words. "
-    "Be enthusiastic and surprising. "
-    "Just the fact, no title or quotes."
+    "You are a funny storyteller for kids. "
+    "Use a real fun fact from the web results to write a tiny funny story in 2-3 sentences, max 35 words. "
+    "Make it surprising and silly. "
+    "Just the story, no title, no quotes."
 )
 
 
 def _draw(display, colors, WIDTH, HEIGHT):
-    display.set_pen(colors["BLACK"])
+    # Dark blue background
+    display.set_pen(colors["BLUE"])
     display.clear()
-
-    # Border frame
-    display.set_pen(colors["CYAN"])
-    display.rectangle(4, 4, WIDTH - 8, HEIGHT - 8)
-    display.set_pen(colors["BLACK"])
-    display.rectangle(8, 8, WIDTH - 16, HEIGHT - 16)
 
     # Title
     display.set_pen(colors["YELLOW"])
-    display.text("FUN FACTS", 80, 16, WIDTH, 3)
+    display.text("STORY TIME", 70, 5, WIDTH, 3)
 
     # Divider line
-    display.set_pen(colors["CYAN"])
-    display.rectangle(20, 42, WIDTH - 40, 2)
+    display.set_pen(colors["YELLOW"])
+    display.rectangle(10, 30, WIDTH - 20, 2)
 
-    # Story text
+    # Story text — white on dark blue for readability
     display.set_pen(colors["WHITE"])
-    display.text(_story, 20, 52, 280, 2)
+    display.text(_story, 10, 40, WIDTH - 20, 2)
 
     # Button hint
-    display.set_pen(colors["GREEN"])
-    display.text("X: new fact", 20, 222, WIDTH, 2)
+    display.set_pen(colors["CYAN"])
+    display.text("X: new story", 10, 222, WIDTH, 2)
 
     display.update()
 
 
 def init(display, buttons, led, colors, WIDTH, HEIGHT):
     global _story, _loading, _x_was_pressed
-    _story = "Press X for a fun fact!"
+    _story = "Press X for a story!"
     _loading = False
     _x_was_pressed = False
     _draw(display, colors, WIDTH, HEIGHT)
@@ -67,7 +62,7 @@ def update(display, buttons, led, colors, WIDTH, HEIGHT):
             import llm
             gc.collect()
             _story = llm.prompt(
-                "Tell me a random fun fact about science, animals, space, or history",
+                "Tell me something amazing about science, animals, space, or history",
                 system=_SYSTEM,
                 max_tokens=400,
                 web_search=True,

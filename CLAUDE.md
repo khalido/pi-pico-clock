@@ -155,17 +155,45 @@ import mip; mip.install("package-name")
 
 ## Agent Learnings
 
-- **MicroPython imports**: `picographics`, `pimoroni`, `machine` are Pico-specific — LSP errors on desktop are expected
-- **Memory**: Display framebuffer (~77KB) is the biggest consumer. Always `gc.collect()` before allocations
-- **Display**: Must call `display.update()` after drawing — changes aren't automatic
-- **WiFi**: Use `network.WLAN(network.STA_IF)` — connect once at boot
-- **Time**: `ntptime.settime()` sets UTC. Convert to local time with offset (see app_clock.py for Sydney DST)
-- **HTTP on MicroPython**: Use HTTP/1.0 to avoid chunked transfer encoding. Raw `socket` + `ssl`/`tls` is better than `urequests`
+### MicroPython Gotchas
+- **Imports**: `picographics`, `pimoroni`, `machine` are Pico-specific — LSP errors on desktop are expected
 - **Module globals**: Functions modifying module-level vars need `global` declarations — missing these causes "local variable referenced before assignment"
+- **Gzip**: Use `deflate.DeflateIO(f, deflate.GZIP)` — no `gzip` module
+- **SSLSocket**: No `.flush()` attribute on MicroPython's SSL sockets — don't call it
+- **`tls` vs `ssl`**: MicroPython uses `import tls`, CPython uses `import ssl`. The micropython-lib requests.py handles this
+
+### Memory Management (264KB SRAM, ~112KB free after display)
+- Display framebuffer (~77KB) is the biggest consumer. Always `gc.collect()` before allocations
+- **Lazy load apps**: Use `__import__()` to load, `del sys.modules[name]` + `gc.collect()` to unload
+- **Unload deps too**: When switching apps, also unload `llm`, `requests` etc. from `sys.modules`
+- **Avoid full JSON parse**: API responses can be huge (web search results, reasoning tokens). Extract needed fields via string search instead of `json.loads()` — saves holding both raw bytes and parsed dict in memory
+- **Delete intermediates**: `del response`, `del raw`, `gc.collect()` between steps
+
+### Display & Buttons
+- Must call `display.update()` after drawing — changes aren't automatic
+- `pimoroni.Button.read()` has built-in edge detection + auto-repeat
+- `pimoroni.Button.is_pressed` is raw state (no edge detection)
 - **IRQ for buttons**: `machine.Pin.irq(trigger=IRQ_FALLING)` for instant response. Disable during app switching to prevent re-entry
-- **mpremote**: `cp -r src/ :` copies the `src` dir itself, not contents. Upload files individually
-- **Blocking main.py**: Infinite loops prevent mpremote REPL access. Use `flash_nuke.uf2` if locked out
-- **Gzip**: Use `deflate.DeflateIO(f, deflate.GZIP)` — no `gzip` module in MicroPython
+- **PicoGraphics**: `rectangle()` takes 4 args (x, y, w, h) — no border radius. `circle()` and `triangle()` available
+- All colors must be pre-created with `display.create_pen()` and stored in a dict
+
+### Network & APIs
+- **WiFi**: `network.WLAN(network.STA_IF)` — connect once at boot
+- **Time**: `ntptime.settime()` sets UTC. Convert to local time with offset (see app_clock.py for Sydney DST)
+- **HTTP**: Use micropython-lib `requests.py` (HTTP/1.0, no chunked). Copy it into src/
+- **OpenRouter**: OpenAI-compatible API at `openrouter.ai/api/v1/chat/completions`. Supports plugins (web search via exa). Use `google/gemini-3-flash-preview` for fast, cheap responses
+- **Reasoning models waste tokens**: Models like gpt-5-mini, kimi-k2.5 burn most of `max_tokens` on internal reasoning, leaving little for the answer. Avoid for short-response use cases
+- **`max_tokens` vs `max_completion_tokens`**: Reasoning models (o1, o3, gpt-5) need `max_completion_tokens` instead of `max_tokens`
+
+### mpremote
+- `cp -r src/ :` copies the `src` dir itself, not contents. Upload files individually
+- Blocking main.py infinite loops prevent REPL access. Use `flash_nuke.uf2` if locked out
+- Always use `connect /dev/cu.usbmodem1101` — auto-detection picks wrong USB devices
+
+### Testing
+- `src/requests.py` shadows CPython's `requests` — use `sys.path.append()` (not insert) in tests
+- Mock `env` module with `MagicMock()` before importing `llm` in tests
+- Name custom HTTP module `phttp.py` not `http.py` (shadows CPython's built-in `http`)
 
 ## Files to Ignore
 

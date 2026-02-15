@@ -124,8 +124,8 @@ gc.collect()
 print(f"Ready to load apps (free: {gc.mem_free()})")
 
 # App switcher — lazy imports to save memory
-app_names = ["Clock", "Timer", "Breakout", "Reaction", "Fun Facts"]
-app_modules = ["app_clock", "app_timer", "app_pong", "app_react", "app_story"]
+app_names = ["Clock", "Weather", "Timer", "Breakout", "Reaction", "Story"]
+app_modules = ["app_clock", "app_weather", "app_timer", "app_pong", "app_react", "app_story"]
 current_app_idx = 0
 current_app = None
 
