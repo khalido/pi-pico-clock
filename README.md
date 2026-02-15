@@ -69,8 +69,7 @@ The clock will:
 ├── src/                   # Code that goes on Pico
 │   ├── main.py           # Main application - clock + display logic
 │   ├── pico_utils.py     # Helper functions
-│   ├── llm.py            # OpenAI API client experiments
-│   ├── clock.py          # Clock utilities
+│   ├── pico_utils.py     # Helper functions
 │   ├── env.py            # WiFi credentials (gitignored)
 │   ├── env.template      # Template for env.py
 │   └── quotes_gz/        # Hourly quotes in gzipped JSON format

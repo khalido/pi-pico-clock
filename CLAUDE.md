@@ -1,12 +1,19 @@
 # Project Context
 
-A Raspberry Pi Pico W clock with quote display on a Pimoroni 2" LCD.
+A Raspberry Pi Pico W multi-app system with a Pimoroni 2" LCD display. Apps include a clock, countdown timer, pong game, and (planned) LLM chat. Built as a fun project with a kid.
 
 ## Architecture
 
-- **src/main.py**: Main loop, WiFi/NTP setup, button handling, display updates
-- **src/quotes_gz/**: Gzipped JSON files (00.json.gz - 23.json.gz) containing hourly quotes
-- **src/env.py**: WiFi credentials (WIFI_SSID, WIFI_PASSWORD) - gitignored
+Multi-app system with button A cycling between apps:
+
+- **src/main.py**: Boot, WiFi/NTP, app switcher (button A via hardware IRQ)
+- **src/app_clock.py**: Clock display with auto Sydney DST
+- **src/app_timer.py**: Countdown timer with circular pie visualization
+- **src/app_pong.py**: Single-player pong game
+- **src/phttp.py**: Minimal HTTPS client (raw sockets, no dependencies)
+- **src/llm.py**: OpenAI API wrapper using phttp.py
+- **src/pico_utils.py**: Helper functions (filesystem info)
+- **src/env.py**: WiFi + API credentials (gitignored)
 - **src/env.template**: Template showing required env variables
 
 ## Project Structure
@@ -14,125 +21,185 @@ A Raspberry Pi Pico W clock with quote display on a Pimoroni 2" LCD.
 ```
 pi-pico-clock/
 ├── src/                   # Code that goes on Pico
-│   ├── main.py           # Entry point (runs on boot)
+│   ├── main.py           # Boot + app switcher
+│   ├── app_clock.py      # App: Clock (auto DST for Sydney)
+│   ├── app_timer.py      # App: Countdown timer
+│   ├── app_pong.py       # App: Pong game
+│   ├── phttp.py           # Minimal HTTPS POST client (socket + ssl)
+│   ├── llm.py            # OpenAI chat completions wrapper
 │   ├── pico_utils.py     # Helper functions
-│   ├── llm.py            # OpenAI API client
-│   ├── clock.py          # Clock utilities
-│   ├── env.py            # WiFi secrets (gitignored)
+│   ├── env.py            # Secrets: WIFI_SSID, WIFI_PASSWORD, OPENAI_API_KEY (gitignored)
 │   ├── env.template      # Template for env.py
-│   └── quotes_gz/        # Hourly quote data
-├── data/                 # Source data and analysis
-│   ├── quotes.json       # Source quotes (not on Pico)
+│   └── quotes_gz/        # Hourly quote data (future use)
+├── data/                 # Source data and analysis (not on Pico)
+│   ├── quotes.json       # Source quotes
+│   ├── quotes_gz/        # Compressed quote files
 │   └── analysis.ipynb    # Analysis notebook
-├── tests/                # Desktop tests (if any)
-├── README.md             # Project docs
-└── CLAUDE.md             # Development context
+├── firmware/             # Firmware .uf2 files
+├── README.md
+└── CLAUDE.md
 ```
 
 ## Hardware
 
-- Raspberry Pi Pico W (WiFi-enabled)
-- Pimoroni Pico Display Pack 2.0 (320x240 LCD, 4 buttons, RGB LED)
+- **Raspberry Pi Pico W** (RP2040, 264KB SRAM, WiFi)
+  - Upgrade path: **Pico 2W** (RP2350, 520KB SRAM) — drop-in replacement, same pinout
+- **Pimoroni Pico Display Pack 2.0** (320x240 SPI LCD, 4 buttons, RGB LED)
+
+## Button Layout (Physical)
+
+```
+┌─────────────────────────┐
+│  [A]              [X]   │  A = top-left,  X = top-right
+│                         │
+│      320x240 LCD        │
+│                         │
+│  [B]              [Y]   │  B = bottom-left, Y = bottom-right
+└─────────────────────────┘
+```
+
+| Button | GPIO | Role | Description |
+|--------|------|------|-------------|
+| **A** | 12 | Global | Cycle apps (hardware IRQ, always responsive) |
+| **X** | 14 | Action | Start/pause, options (top-right) |
+| **B** | 13 | Left | Move left, decrease values (bottom-left) |
+| **Y** | 15 | Right | Move right, increase values (bottom-right) |
+
+**Important**: Button A uses `machine.Pin` with IRQ (not `pimoroni.Button`) for instant response. Buttons B/X/Y use `pimoroni.Button` with polling.
+
+## App Interface
+
+Each app module exports two functions with module-level state (no classes):
+
+```python
+def init(display, buttons, led, colors, WIDTH, HEIGHT):
+    """Setup/reset state, draw initial screen."""
+
+def update(display, buttons, led, colors, WIDTH, HEIGHT):
+    """Called every tick (~50ms). Handle input + draw."""
+```
+
+- `buttons` is a dict: `{"B": Button(13), "X": Button(14), "Y": Button(15)}`
+- `colors` is a dict: `{"RED": pen, "GREEN": pen, "WHITE": pen, ...}`
+- Apps are lazy-loaded and unloaded on switch to save memory
 
 ## Key Libraries
 
-- `picographics`: Display driver
-- `pimoroni`: Button and RGB LED control
-- `network`, `ntptime`: WiFi and time sync
-- `gzip`, `json`: Quote file handling
+- `picographics`: Display driver (PicoGraphics, `DISPLAY_PICO_DISPLAY_2`)
+- `pimoroni`: Button (with auto-repeat) and RGBLED control
+- `network`, `ntptime`: WiFi and NTP time sync (sets UTC)
+- `socket`, `ssl`/`tls`: Raw HTTPS connections (our phttp.py)
+- `deflate`, `json`: Gzip + JSON for quote files
 
-## Development Notes
+## Memory Constraints (Pico W — 264KB SRAM)
 
-- Uses MicroPython (Pimoroni firmware with built-in drivers)
-- Display buffer updates only on `display.update()`
-- Quotes loaded hourly to conserve memory
-- 4 buttons: A (GPIO 12), B (GPIO 13), X (GPIO 14), Y (GPIO 15)
+- Display framebuffer: ~77KB (320x240 at 8bpp)
+- Available after boot + display: ~112KB
+- Quote JSON files need ~165KB to decompress+parse — **too large** for current Pico W
+- Pico 2W (520KB) would have ~440KB free — quotes would fit easily
+- Always `gc.collect()` before heavy allocations
+- `del` intermediates immediately, free unused modules via `del sys.modules[name]`
+
+## pimoroni.Button API
+
+```python
+button.read()       # True on press + auto-repeats (200ms, 3x faster after 1s hold)
+button.raw()        # Instantaneous state, no edge detection
+button.is_pressed   # Same as raw(), property syntax
+Button(pin, repeat_time=0)  # Single-shot, no auto-repeat
+```
+
+Buttons are active-low with internal pull-ups (`invert=True` default).
+
+## Development Workflow
+
+### mpremote CLI (Recommended)
+
+```bash
+uv tool install mpremote  # or: pip install mpremote
+```
+
+**IMPORTANT: Always use `connect /dev/cu.usbmodem1101`** (or whatever port). Auto-detection may pick wrong USB serial device (e.g. LG monitor).
+
+```bash
+# Common commands
+mpremote connect /dev/cu.usbmodem1101 exec "..."        # Run code on Pico
+mpremote connect /dev/cu.usbmodem1101 ls :              # List files on Pico
+mpremote connect /dev/cu.usbmodem1101 repl               # Interactive REPL
+
+# Upload files individually (NOT `cp -r src/ :` which nests the src dir)
+mpremote connect /dev/cu.usbmodem1101 cp src/main.py :main.py
+
+# Chain multiple uploads + reset
+mpremote connect /dev/cu.usbmodem1101 cp src/main.py :main.py + cp src/app_pong.py :app_pong.py + reset
+```
+
+### Firmware
+
+**Pico W (current: Pimoroni picow v1.25.0, MicroPython v1.25.0)**
+- Download: [pimoroni-pico releases](https://github.com/pimoroni/pimoroni-pico/releases) — must be **picow** variant
+- Flash: hold BOOTSEL + plug USB, drag .uf2 onto RPI-RP2 drive
+- Wipe first if needed: flash `flash_nuke.uf2`, then re-flash firmware
+
+**Pico 2W (future: RP2350)**
+- Download: [pimoroni-pico-rp2350 releases](https://github.com/pimoroni/pimoroni-pico-rp2350/releases)
+- Same flash procedure, uses **pico2w** variant
+
+```python
+# Check firmware version
+import sys; sys.version
+
+# Install packages on-device
+import mip; mip.install("package-name")
+```
+
+## Agent Learnings
+
+- **MicroPython imports**: `picographics`, `pimoroni`, `machine` are Pico-specific — LSP errors on desktop are expected
+- **Memory**: Display framebuffer (~77KB) is the biggest consumer. Always `gc.collect()` before allocations
+- **Display**: Must call `display.update()` after drawing — changes aren't automatic
+- **WiFi**: Use `network.WLAN(network.STA_IF)` — connect once at boot
+- **Time**: `ntptime.settime()` sets UTC. Convert to local time with offset (see app_clock.py for Sydney DST)
+- **HTTP on MicroPython**: Use HTTP/1.0 to avoid chunked transfer encoding. Raw `socket` + `ssl`/`tls` is better than `urequests`
+- **Module globals**: Functions modifying module-level vars need `global` declarations — missing these causes "local variable referenced before assignment"
+- **IRQ for buttons**: `machine.Pin.irq(trigger=IRQ_FALLING)` for instant response. Disable during app switching to prevent re-entry
+- **mpremote**: `cp -r src/ :` copies the `src` dir itself, not contents. Upload files individually
+- **Blocking main.py**: Infinite loops prevent mpremote REPL access. Use `flash_nuke.uf2` if locked out
+- **Gzip**: Use `deflate.DeflateIO(f, deflate.GZIP)` — no `gzip` module in MicroPython
 
 ## Files to Ignore
 
-- src/env.py (contains WiFi password)
+- src/env.py (contains secrets)
 - __pycache__/
 - .DS_Store
-
-## Development Workflow (2026)
-
-**Recommended: mpremote CLI (Simplest for AI-assisted development)**
-
-Install (using uv):
-```bash
-uv tool install mpremote
-```
-
-Or with pip/pipx:
-```bash
-pip install mpremote
-# or
-pipx install mpremote
-```
-
-Common commands:
-```bash
-mpremote                          # Connect to REPL
-mpremote cp src/main.py :main.py  # Copy single file
-mpremote cp -r src/ :             # Copy entire src folder to Pico root
-mpremote run src/script.py        # Run without saving to board
-mpremote connect list             # List connected devices
-mpremote repl                     # Interactive REPL session
-
-# Development workflow
-mpremote cp -r src/ : + repl      # Upload all and open REPL
-```
-
-**Alternative: VS Code + MicroPico Extension**
-- Install MicroPico extension
-- Auto-upload on save, integrated REPL
-- Good for: GUI-based development
-
-**Firmware Updates (Feb 2026)**
-- **MicroPython v1.27.0** (Dec 2025) - latest stable
-- **Pimoroni v1.26.1** (Sep 2025) - for Pico W with Pimoroni hardware
-- Download from [pimoroni-pico releases](https://github.com/pimoroni/pimoroni-pico/releases)
-- Flash via BOOTSEL button + UF2 drag-and-drop
-
-**Check firmware version:**
-```python
-import sys
-sys.version
-```
-
-**Install packages:**
-```python
-import mip
-mip.install("package-name")
-```
 
 ## Code Style
 
 - Keep functions small and focused
-- Use type hints where practical
 - Clear variable names over comments
 - Minimal comments (code should be self-documenting)
-
-## Agent Learnings
-
-- **MicroPython imports**: Libraries like `picographics`, `pimoroni`, `machine` are Pico-specific and will show LSP errors on desktop - this is expected
-- **Memory constraints**: Loading large files crashes the Pico - use gzip compression and load only current hour's quotes
-- **Display updates**: Must call `display.update()` after drawing - changes aren't automatic
-- **WiFi on Pico**: Use `network.WLAN(network.STA_IF)` - connect once at boot, not in loop
-- **Time sync**: `ntptime.settime()` sets UTC - convert to local timezone manually
-
-## TODO
-
-- [ ] Update MicroPython firmware to v1.27.0 (or latest Pimoroni v1.26.1)
-- [ ] Clean up llm.py - remove test code and add error handling
-- [ ] Consider migrating from deprecated GPT-3.5 to GPT-4o-mini
-- [ ] Add retry logic for WiFi connection failures
-- [ ] Create sample env.py template for easier setup
+- No classes unless truly needed — module-level functions + globals for apps
+- Always test on-device; desktop linting will flag false errors for Pico-specific imports
 
 ## Resources
 
-- [Pimoroni Pico MicroPython](https://github.com/pimoroni/pimoroni-pico) - Official firmware and libraries
-- [PicoGraphics Documentation](https://github.com/pimoroni/pimoroni-pico/tree/main/micropython/modules/picographics)
-- [MicroPython Documentation](https://docs.micropython.org/)
-- [mpremote Documentation](https://docs.micropython.org/en/latest/reference/mpremote.html) - Official MicroPython remote control tool
-- [Awesome MicroPython](https://github.com/mcauser/awesome-micropython)
+### Official Documentation
+- [MicroPython Docs](https://docs.micropython.org/) — language reference, stdlib
+- [MicroPython stdlib](https://docs.micropython.org/en/latest/library/index.html) — built-in modules (socket, ssl, json, time, etc.)
+- [mpremote](https://docs.micropython.org/en/latest/reference/mpremote.html) — remote control tool
+
+### Pimoroni (Display + Firmware)
+- [pimoroni-pico](https://github.com/pimoroni/pimoroni-pico) — Pico W firmware + libraries
+- [pimoroni-pico-rp2350](https://github.com/pimoroni/pimoroni-pico-rp2350) — Pico 2W firmware
+- [PicoGraphics API](https://github.com/pimoroni/pimoroni-pico/tree/main/micropython/modules/picographics)
+- [pimoroni.py source](https://github.com/pimoroni/pimoroni-pico/blob/main/micropython/modules_py/pimoroni.py) — Button class source
+
+### MicroPython Ecosystem
+- [micropython-lib](https://github.com/micropython/micropython-lib) — official extra packages (requests, datetime, logging, etc.). Install via `mip.install()`
+- [micropython-lib/requests](https://github.com/micropython/micropython-lib/tree/master/python-ecosys/requests) — official HTTP client (uses HTTP/1.0, no chunked)
+- [Awesome MicroPython](https://github.com/mcauser/awesome-micropython) — curated list of libraries and projects
+- [mrequests](https://github.com/SpotlightKid/mrequests) — HTTP client with chunked encoding support (reference)
+
+### Hardware
+- [Pico Display Pack 2.0](https://shop.pimoroni.com/products/pico-display-pack-2-0) — 320x240 LCD, 4 buttons, RGB LED
+- [Raspberry Pi Pico 2W](https://littlebirdelectronics.com.au/products/raspberry-pi-pico-2wh) — RP2350, 520KB SRAM (upgrade path)

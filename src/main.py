@@ -1,249 +1,181 @@
-# using micropython from https://github.com/pimoroni/pimoroni-pico
-import json
+import gc
 import os
+import sys
 import time
 
-import deflate
-import jpegdec  # show simple jpegs
 import machine
 import network
 import ntptime
-import requests
 from picographics import DISPLAY_PICO_DISPLAY_2, PicoGraphics
-
-# pimonori libraries
 from pimoroni import RGBLED, Button
 
 import env
 
-# pimoniri display + buttons setup
-# Pico Display 2 - 320x240 SPI LCD with 4 buttons and a RGB led
-# https://shop.pimoroni.com/products/pico-display-pack-2-0
+# Hardware setup
 display = PicoGraphics(display=DISPLAY_PICO_DISPLAY_2, rotate=0)
-
 WIDTH, HEIGHT = display.get_bounds()
 
-button_a = Button(12)
-button_b = Button(13)
-button_x = Button(14)
-button_y = Button(15)
-
-led = RGBLED(6, 7, 8)  # the rgb led on the display board itself
+# Button A (GPIO 12) is the global app-cycle button via IRQ
+button_a_pin = machine.Pin(12, machine.Pin.IN, machine.Pin.PULL_UP)
+_switch_requested = False
+_last_irq_time = 0
 
 
-# List of available pen colours, add more if necessary
-RED = display.create_pen(209, 34, 41)
-ORANGE = display.create_pen(246, 138, 30)
-WHITE = display.create_pen(255, 255, 255)
-BLACK = display.create_pen(0, 0, 0)
-CYAN = display.create_pen(0, 255, 255)
-MAGENTA = display.create_pen(255, 0, 255)
-YELLOW = display.create_pen(255, 255, 0)
-GREEN = display.create_pen(0, 255, 0)
+def _button_a_handler(pin):
+    global _switch_requested, _last_irq_time
+    now = time.ticks_ms()
+    if time.ticks_diff(now, _last_irq_time) > 300:  # debounce
+        _switch_requested = True
+        _last_irq_time = now
 
-# raspberry pico w setup
-# setup the led, defaulting to off
+
+button_a_pin.irq(trigger=machine.Pin.IRQ_FALLING, handler=_button_a_handler)
+
+# Remaining buttons available to apps
+buttons = {
+    "B": Button(13),
+    "X": Button(14),
+    "Y": Button(15),
+}
+
+led = RGBLED(6, 7, 8)
 pico_led = machine.Pin("LED", machine.Pin.OUT, value=0)
-# use led.off() or led.on() to turn on and off
+
+# Colors dict passed to all apps
+colors = {
+    "RED": display.create_pen(209, 34, 41),
+    "ORANGE": display.create_pen(246, 138, 30),
+    "WHITE": display.create_pen(255, 255, 255),
+    "BLACK": display.create_pen(0, 0, 0),
+    "CYAN": display.create_pen(0, 255, 255),
+    "MAGENTA": display.create_pen(255, 0, 255),
+    "YELLOW": display.create_pen(255, 255, 0),
+    "GREEN": display.create_pen(0, 255, 0),
+    "BLUE": display.create_pen(50, 50, 255),
+}
 
 
-# sets up a handy function we can call to clear the screen
 def clear():
-    display.set_pen(BLACK)
+    display.set_pen(colors["BLACK"])
     display.clear()
     display.update()
 
 
-def blink_led(N: int = 1, rgb=(209, 34, 41), T=0.08):
-    """blinks led n times"""
-    for _ in range(N):
+def blink_led(n=1, rgb=(209, 34, 41), t=0.08):
+    for _ in range(n):
         led.set_rgb(*rgb)
-        time.sleep(T)
+        time.sleep(t)
         led.set_rgb(0, 0, 0)
-        if N > 1:
+        if n > 1:
             time.sleep(0.05)
 
 
-# boot process
+def connect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(env.WIFI_SSID, env.WIFI_PASSWORD)
+
+    max_wait = 25
+    while max_wait > 0:
+        if wlan.status() < 0 or wlan.status() >= 3:
+            break
+        max_wait -= 1
+        print("waiting for connection...")
+        time.sleep(1)
+
+    if wlan.status() != 3:
+        raise RuntimeError("network connection failed")
+
+    ip = wlan.ifconfig()[0]
+    print(f"connected, ip = {ip}")
+    ntptime.settime()
+    print(f"Time: {time.localtime()}")
+    return ip
+
+
+# Boot sequence
 print(f"booting...\n{os.uname().machine} running {os.uname().version}")
-time.sleep(0.15)
+display.set_backlight(0.5)
+display.set_font("bitmap8")
 clear()
 
-# blink the front led, why not?
-display.set_pen(GREEN)
+display.set_pen(colors["GREEN"])
 display.text("Booting....", 2, 0, scale=3)
 display.text(f"Running on {os.uname().machine}", 6, 40, WIDTH, scale=2)
 display.update()
-for _ in range(4):
-    led.set_rgb(209, 34, 41)
-    time.sleep(0.1)
-    led.set_rgb(0, 0, 0)
-    time.sleep(0.05)
+blink_led(4)
 
 clear()
-
-display.set_backlight(0.5)
-display.set_font("bitmap8")
-display.set_pen(GREEN)
-display.text("Hello World", 2, 0, scale=4)
-
-display.set_pen(CYAN)
-display.text(
-    "Ok so the very basics work, now to do something useful.", 3, 40, WIDTH, scale=2
-)
-
-# Display the result
+ip = connect_wifi()
+display.set_pen(colors["GREEN"])
+display.text("Connected!", 2, 0, scale=3)
+display.text(f"IP: {ip}", 6, 40, WIDTH, scale=2)
+display.set_pen(colors["WHITE"])
+display.text("Press A to cycle apps", 6, 100, WIDTH, scale=2)
 display.update()
+time.sleep(2)
+
+# Free boot modules no longer needed
+del ip
+for mod in ["ntptime", "network", "env"]:
+    if mod in sys.modules:
+        del sys.modules[mod]
+gc.collect()
+print(f"Ready to load apps (free: {gc.mem_free()})")
+
+# App switcher — lazy imports to save memory
+app_names = ["Clock", "Timer", "Breakout", "Reaction", "Fun Facts"]
+app_modules = ["app_clock", "app_timer", "app_pong", "app_react", "app_story"]
+current_app_idx = 0
+current_app = None
 
 
-# connect to wifi
-ssid = env.WIFI_SSID
-password = env.WIFI_PASSWORD
+def switch_app(idx):
+    global current_app, current_app_idx, _switch_requested
+    # Disable IRQ during switch to prevent re-entry
+    button_a_pin.irq(handler=None)
+    _switch_requested = False
 
-wlan = network.WLAN(network.STA_IF)
-wlan.active(True)
-wlan.connect(ssid, password)
+    # Unload previous app module + its deps to free memory
+    if current_app is not None:
+        mod_name = app_modules[current_app_idx]
+        for m in (mod_name, "llm", "requests"):
+            if m in sys.modules:
+                del sys.modules[m]
+        current_app = None
+        gc.collect()
 
-# Wait for connect or fail
-max_wait = 25
-while max_wait > 0:
-    if wlan.status() < 0 or wlan.status() >= 3:
-        break
-    max_wait -= 1
-    print("waiting for connection...")
-    time.sleep(1)
+    current_app_idx = idx
+    print(f"Switching to {app_names[idx]} (free: {gc.mem_free()})")
+    current_app = __import__(app_modules[idx])
+    gc.collect()
+    current_app.init(display, buttons, led, colors, WIDTH, HEIGHT)
+    print(f"Loaded {app_names[idx]} (free: {gc.mem_free()})")
 
-# Handle connection error
-if wlan.status() != 3:
-    raise RuntimeError("network connection failed")
-else:
-    status = wlan.ifconfig()
-    ip = status[0]
-    print(f"connected, ip = {ip}")
-    # set time from internet
-    ntptime.settime()
-    print(f"Time: {time.localtime()}")
+    # Re-enable IRQ
+    button_a_pin.irq(trigger=machine.Pin.IRQ_FALLING, handler=_button_a_handler)
 
 
-# connect to web
-print("attempting to fetch a url to test internet")
-r = requests.get("https://httpbin.org/get")
-if r.status_code == 200:
-    print(r.text)  # if a print than this worked
-else:
-    print(f"something went wrong, status: {r.status_code} ")
+switch_app(0)
 
-
-display.set_backlight(0.5)
-display.set_font("bitmap8")
-display.set_pen(GREEN)
-display.text("Hello World", 2, 0, scale=4)
-
-display.set_pen(CYAN)
-display.text(
-    "Ok so the very basics work, now to do something useful.", 3, 40, WIDTH, scale=2
-)
-
-display.set_pen(GREEN)
-display.text("wifi ip = " + status[0], 6, 140, WIDTH, scale=2)
-
-# Display the result
-display.update()
-time.sleep(1)
-
-
-def get_time():
-    """returns current time in 00:00 format"""
-    t = time.localtime()
-    # t = (2024, 4, 20, 2, 48, 6, 5, 111)
-    return f"{t[3]:02}:{t[4]:02}"
-
-
-def open_quotes(hour="00"):
-    print(f"attempting to open quotes file for hour {hour}")
-
-    with gzip.open(f"quotes/{hour}.json.gz", "rb") as f:
-        decompressed_data = f.read()  # data returned as bytes
-
-    quotes = json.loads(decompressed_data.decode("utf-8"))
-
-    print(f"loaded quotes file for hour {hour}.")
-
-    print(quotes.keys())
-    return quotes
-
-
-def get_quote(time_str):
-    try:
-        quote = quotes[time_str]
-    except:
-        quote = "fake quote"
-    print(quote)
-    return quote
-
-
-file_hour = None
-
-# load file if necessary
-time_str = get_time()
-hour = time_str[:2]
-if file_hour != hour:
-    quotes = open_quotes(hour)
-    file_hour = hour
-
-
-# do the buttons
-clear()
 while True:
+    try:
+        if _switch_requested:
+            _switch_requested = False
+            led.set_rgb(0, 0, 0)
+            switch_app((current_app_idx + 1) % len(app_names))
 
-    # load file if necessary
-    time_str = get_time()
-    hour = time_str[:2]
-    if file_hour != hour:
-        quotes = open_quotes(hour)
-        file_hour = hour
-        print(f"loaded quotes for {hour} at time {time_str}")
-
-    quote = get_quote(time_str)
-
-    if button_a.read():
-        blink_led()
-        clear()
-        display.set_pen(WHITE)
-        display.text("Button A pressed", 10, 10, 240, 4)
+        current_app.update(display, buttons, led, colors, WIDTH, HEIGHT)
+    except Exception as e:
+        print(f"Error in {app_names[current_app_idx]}: {e}")
+        display.set_pen(colors["BLACK"])
+        display.clear()
+        display.set_pen(colors["RED"])
+        display.text("ERROR", 10, 10, WIDTH, 4)
+        display.set_pen(colors["WHITE"])
+        display.text(f"{app_names[current_app_idx]}: {e}", 10, 60, WIDTH, 2)
         display.update()
-        time.sleep(1)
-        clear()
-    elif button_b.read():
-        blink_led()
-        clear()
-        display.set_pen(CYAN)
-        display.text("Button B pressed", 10, 10, 240, 4)
-        display.update()
-        time.sleep(1)
-        clear()
-    elif button_x.read():
-        blink_led()
-        clear()
-        display.set_pen(MAGENTA)
-        display.text("Button X pressed", 10, 10, 240, 4)
-        display.update()
-        time.sleep(1)
-        clear()
-    elif button_y.read():
-        blink_led()
-        clear()
-        display.set_pen(YELLOW)
-        display.text("Button Y pressed, exiting while loop", 10, 10, 240, 3)
-        display.update()
-        time.sleep(1)
-        clear()
-        break
-    else:
-        clear()
-        display.set_pen(GREEN)
-        display.text("Press any button!", 10, 10, 240, 3)
-        display.text(f"{get_time()}", 10, 70, 240, 3)
-        display.text(f"{quote}", 10, 100, WIDTH, 2)
-        display.update()
-    time.sleep(2)  # this number is how frequently the Pico checks for button presses
+        time.sleep(3)
+        # Try switching to next app
+        switch_app((current_app_idx + 1) % len(app_names))
+    time.sleep(0.05)

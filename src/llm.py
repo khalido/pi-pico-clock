@@ -1,141 +1,111 @@
-def prompt(
-        self, user_msg=None, prompt=None, stream=False, max_tokens=None, log=None
-    ):
-    pass
+import gc
 
-import os
-import sys
+import env
 import requests
-import json
+
+_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+_HEADERS = {
+    "Authorization": f"Bearer {env.OPENROUTER_API_KEY}",
+    "Content-Type": "application/json",
+}
+
+MODEL = "google/gemini-3-flash-preview"
+
+DEFAULT_SYSTEM = (
+    "You are a helpful and funny assistant talking to a 10 year old kid. "
+    "Keep answers short - max 2 sentences."
+)
 
 
+def _extract_content(raw):
+    """Extract content string from API response without full JSON parse."""
+    # Check for error first
+    err = raw.find('"error"')
+    choices = raw.find('"choices"')
+    if err != -1 and (choices == -1 or err < choices):
+        msg_start = raw.find('"message"', err)
+        if msg_start != -1:
+            msg_start = raw.find(':"', msg_start) + 2
+            msg_end = raw.find('"', msg_start)
+            raise OSError(raw[msg_start:msg_end])
+        raise OSError("API error")
 
-class LLM:
-    """a basic object to be able to chat with openai using micropython"""
+    # Find "content": "..." in the first choice's message
+    # Look for "content" that follows "message"
+    msg = raw.find('"message"')
+    if msg == -1:
+        raise OSError("No message in response")
 
-    def __init__(self):
-        self.model: str = "gpt-3.5-turbo"
-        self.key: str = os.environ["OPENAI_API_KEY"]
-        self.max_tokens = 4000  # gpt 3.5 max token is 4,097
+    ct = raw.find('"content"', msg)
+    if ct == -1:
+        raise OSError("No content in response")
 
-        self.chat_endpoint = "https://api.openai.com/v1/chat/completions"
+    # Skip past "content":
+    i = raw.find(":", ct + 9) + 1
+    # Skip whitespace
+    while raw[i] in " \t\n\r":
+        i += 1
 
-        self.system = """You are a helpful and somewhat humourous assistant who answers concisefully and truthfully. 
-        You are talking to a 10 year old kid. Keep the answers short and snappy."""
-        self.default_msg = (
-            "Who is talking back to me? I need a name and place. Are you online?"
-        )
+    if raw[i] == "n":  # null
+        raise OSError("Empty response from model")
 
-        self.assistant = None
-        self.user = None
+    if raw[i] != '"':
+        raise OSError("Unexpected content format")
 
-        self.headers = headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.key}",
-        }
+    # Extract the JSON string value, handling escapes
+    i += 1
+    n = len(raw)
+    parts = []
+    while i < n and raw[i] != '"':
+        if raw[i] == "\\":
+            i += 1
+            if i >= n:
+                break
+            c = raw[i]
+            if c == "n":
+                parts.append("\n")
+            elif c == "t":
+                parts.append("\t")
+            elif c == '"':
+                parts.append('"')
+            elif c == "\\":
+                parts.append("\\")
+            else:
+                parts.append(c)
+        else:
+            parts.append(raw[i])
+        i += 1
+    return "".join(parts)
 
-    def prompt(self, user_msg=None, prompt=None, stream=False, max_tokens=None):
-        """takes in a user msg and replies"""
 
-        messages = [
-            {"role": "system", "content": prompt or self.system},
-            {"role": "user", "content": user_msg or self.default_msg},
+def prompt(user_msg, system=None, model=None, max_tokens=150, web_search=False):
+    """Send a prompt via OpenRouter and return the reply text."""
+    gc.collect()
+    body = {
+        "model": model or MODEL,
+        "messages": [
+            {"role": "system", "content": system or DEFAULT_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ],
+        "max_tokens": max_tokens,
+    }
+
+    if web_search:
+        body["plugins"] = [
+            {
+                "id": "web",
+                "engine": "exa",
+                "max_results": 3,
+            }
         ]
 
-        payload = {
-            "model": self.model,
-            "stream": stream,
-            "messages": messages,
-            "max_tokens": max_tokens or self.max_tokens,
-        }
+    response = requests.post(_ENDPOINT, headers=_HEADERS, json=body)
+    raw = response.text
+    response.close()
+    del response
+    gc.collect()
 
-        response = requests.post(self.chat_endpoint, headers=self.headers, json=payload)
-        print(response)
-        if stream == False:
-            reply = response.json()["choices"][0]["message"]["content"]
-            return reply
-        else:
-            return self.stream2(response)
-            # return self.stream_reply(payload)
-
-    def stream_reply(self, payload):
-        print("Streaming the reply....")
-        response = requests.post(self.chat_endpoint, headers=self.headers, json=payload)
-        for line in response.iter_lines():
-            if line:
-                line = line[6:].decode("utf-8")
-                if line != "[DONE]":
-                    content = json.loads(line)
-
-                    if content["choices"][0]["finish_reason"] != "stop":
-                        delta = content["choices"][0]["delta"]["content"]
-                        if delta is not None:
-                            # print(delta, end="")
-                            yield delta
-
-    def stream2(self, response):
-        for line in response.iter_lines():
-            if line:
-                line = line[6:].decode("utf-8")
-                if line != "[DONE]":
-                    content = json.loads(line)
-
-                    if content["choices"][0]["finish_reason"] != "stop":
-                        delta = content["choices"][0]["delta"]["content"]
-                        # print(delta, end="")
-                        yield delta
-
-
-model = LLM()
-
-prompt = "you are mark twain"
-user_msg = "write a 50 - 80 word story. I am testing the streaming feature."
-
-messages = [
-    {"role": "system", "content": prompt},
-    {"role": "user", "content": user_msg},
-]
-
-payload = {
-    "model": "gpt-3.5-turbo",
-    "stream": True,
-    "messages": messages,
-    "max_tokens": 2000,
-}
-
-stream = False
-reply = model.prompt(payload, stream=stream)
-
-if stream == True:
-    text = ""
-    for c in reply:
-        print(c, end="")
-        text += c
-else:
-    print(reply)
-
-print(f"\n\n\n the final output: \n {text}")
-
-
-key: str = os.environ["OPENAI_API_KEY"]
-chat_endpoint = "https://api.openai.com/v1/chat/completions"
-
-headers = headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {key}",
-}
-
-
-# response = requests.post(chat_endpoint, headers=headers, json=payload, stream=True)
-# for line in response.iter_lines(chunk_size=1024):
-#     # print(line)
-#     if line:
-#         line = line[6:].decode("utf-8")
-#         if line != "[DONE]":
-#             content = json.loads(line)
-
-#             if content["choices"][0]["finish_reason"] != "stop":
-#                 delta = content["choices"][0]["delta"]["content"]
-#                 if delta is not None:
-#                     print(delta, end="")
-#                     # yield delta
+    reply = _extract_content(raw)
+    del raw
+    gc.collect()
+    return reply
